@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dvwa-db
+  namespace: dvwa
+spec:
+  replicas: 1 #database pod can only be 1
+  strategy:
+    type: Recreate        # RWO volume: never run two DB pods at once
+  selector:
+    matchLabels:
+      app: dvwa-db
+  template:
+    metadata:
+      labels:
+        app: dvwa-db
+    spec:
+      containers:
+        - name: mariadb
+          image: docker.io/library/mariadb:10.11
+          ports:
+            - containerPort: 3306
+          env:
+            - name: MARIADB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dvwa-db-credentials
+                  key: root-password
+            - name: MARIADB_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: dvwa-db-credentials
+                  key: database
+            - name: MARIADB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: dvwa-db-credentials
+                  key: username
+            - name: MARIADB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dvwa-db-credentials
+                  key: password
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+              subPath: dvwa-db
+          readinessProbe:
+            tcpSocket:
+              port: 3306
+            initialDelaySeconds: 15
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 3306
+            initialDelaySeconds: 60
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: dvwa-nfs

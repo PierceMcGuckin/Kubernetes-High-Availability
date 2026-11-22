@@ -1,0 +1,175 @@
+---
+# Prepares Ubuntu nodes (control plane and workers) for kubeadm.
+# JUST BASIC INSTALL STUFF DOES NOT GET TO A WORKING STATE
+- name: Prepare Kubernetes nodes
+  hosts: k8s_cluster
+  become: yes
+  vars:
+    # Must be identical on every node and match the existing cluster.
+    k8s_minor: "v1.30"
+ 
+  tasks:
+    - name: Disable swap now
+      command: swapoff -a
+      changed_when: false
+ 
+    - name: Comment out swap entries in fstab
+      replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\sswap\s.*)$'
+        replace: '# \1'
+ 
+    - name: Configure required kernel modules for Kubernetes
+      copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+ 
+    - name: Load overlay and br_netfilter kernel modules
+      modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+ 
+    - name: Configure sysctl parameters for Kubernetes networking
+      copy:
+        dest: /etc/sysctl.d/k8s.conf
+        content: |
+          net.bridge.bridge-nf-call-iptables  = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward                 = 1
+ 
+    - name: Apply sysctl parameters
+      command: sysctl --system
+      changed_when: false
+ 
+    - name: Install prerequisite packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gpg
+          - gnupg
+        state: present
+        update_cache: yes
+ 
+    - name: Create keyrings directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+ 
+    - name: Add Docker GPG apt key
+      shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+      args:
+        creates: /etc/apt/keyrings/docker.gpg
+ 
+    - name: Add Docker repository
+      copy:
+        dest: /etc/apt/sources.list.d/docker.list
+        content: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable\n"
+ 
+    - name: Install containerd
+      apt:
+        name: containerd.io
+        state: present
+        update_cache: yes
+ 
+    - name: Create containerd configuration directory
+      file:
+        path: /etc/containerd
+        state: directory
+        mode: '0755'
+ 
+    # The containerd.io package ships a config.toml that disables the CRI plugin and has no
+    # SystemdCgroup setting. A "creates:" guard on generation skipped the real default config,
+    # so the cgroup edit matched nothing and the control plane crash-looped.
+    # Fix: regenerate the full default config unless SystemdCgroup is already enabled.
+    - name: Check whether containerd already uses the systemd cgroup driver
+      command: grep -q 'SystemdCgroup = true' /etc/containerd/config.toml
+      register: containerd_cgroup_check
+      failed_when: false
+      changed_when: false
+ 
+    - name: Generate full default containerd config (includes CRI plugin)
+      shell: containerd config default > /etc/containerd/config.toml
+      when: containerd_cgroup_check.rc != 0
+      notify: Restart containerd
+ 
+    - name: Enable SystemdCgroup in containerd config
+      replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+      notify: Restart containerd
+ 
+    - name: Enable and start containerd
+      systemd:
+        name: containerd
+        state: started
+        enabled: yes
+ 
+    - name: Add Kubernetes GPG apt key
+      shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/{{ k8s_minor }}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+ 
+    - name: Add Kubernetes apt repository
+      copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/{{ k8s_minor }}/deb/ /\n"
+ 
+    - name: Install Kubernetes binaries
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        update_cache: yes
+ 
+    - name: Hold Kubernetes packages at current version
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+ 
+    - name: Enable kubelet (it only stays up after kubeadm init/join)
+      systemd:
+        name: kubelet
+        enabled: yes
+ 
+    - name: Point crictl at containerd
+      copy:
+        dest: /etc/crictl.yaml
+        content: |
+          runtime-endpoint: unix:///run/containerd/containerd.sock
+ 
+    - name: Apply any pending containerd restart before verifying
+      meta: flush_handlers
+ 
+    - name: Verify containerd CRI is enabled
+      command: crictl info
+      changed_when: false
+ 
+    - name: Verify swap is off
+      command: swapon --show --noheadings
+      register: swap_check
+      changed_when: false
+      failed_when: swap_check.stdout | length > 0
+ 
+  handlers:
+    - name: Restart containerd
+      systemd:
+        name: containerd
+        state: restarted
+ 

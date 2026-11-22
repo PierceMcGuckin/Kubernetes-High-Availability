@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: dvwa-nfs-pv
+spec:
+  capacity:
+    storage: 4Gi          # label only; NFS does not enforce size
+  accessModes:
+    - ReadWriteMany
+  
+  #if the claim is deleted keep data on nfs server
+  persistentVolumeReclaimPolicy: Retain
+  
+  #label must equal the PVC's storageClassName
+  storageClassName: nfs-static
+  mountOptions:
+    - nfsvers=4.1
+    # if the server goes away, retry forever instead of erroring
+    - hard
+  nfs:
+    server: 192.168.1.76
+    
+    #the dirs /dvwa-db and /dvwa-uploads live here
+    path: /srv/nfs/k8s

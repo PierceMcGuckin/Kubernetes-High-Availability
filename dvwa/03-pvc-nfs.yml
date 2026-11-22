@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dvwa-nfs
+  namespace: dvwa
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-static #same storage class as the PV
+  
+  #use the PV
+  volumeName: dvwa-nfs-pv
+  resources:
+    requests:
+      storage: 4Gi
+ 
